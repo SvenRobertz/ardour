@@ -472,6 +472,7 @@ PluginPinDialog::refill_sidechain_table ()
 void
 PluginPinDialog::refill_output_presets ()
 {
+	// this logic is duplicated in PluginSetupDialog
 	using namespace Menu_Helpers;
 	_out_presets.clear_items ();
 	PluginOutputConfiguration ppc (_pi->plugin (0)->possible_output ());

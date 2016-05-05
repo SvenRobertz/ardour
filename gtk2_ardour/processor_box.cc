@@ -74,6 +74,7 @@
 #include "mixer_strip.h"
 #include "plugin_pin_dialog.h"
 #include "plugin_selector.h"
+#include "plugin_setup_dialog.h"
 #include "plugin_ui.h"
 #include "port_insert_ui.h"
 #include "processor_box.h"
@@ -2380,9 +2381,26 @@ ProcessorBox::use_plugins (const SelectedPlugins& plugins)
 
 		boost::shared_ptr<Processor> processor (new PluginInsert (*_session, *p));
 
+		PluginSetupDialog psd (_route, boost::dynamic_pointer_cast<PluginInsert> (processor));
 		Route::ProcessorStreams err_streams;
+		int err = 0;
 
-		if (_route->add_processor_by_index (processor, _placement, &err_streams, Config->get_new_plugins_active ())) {
+		if (psd.need_setup ()) {
+			switch (psd.run ()) {
+				case Gtk::RESPONSE_CANCEL:
+					continue;
+				case 2:
+					err = _route->replace_processor  (_route->the_instrument(), processor, &err_streams);
+					break;
+				default:
+					err = _route->add_processor_by_index (processor, _placement, &err_streams, Config->get_new_plugins_active ());
+					break;
+			}
+		} else {
+			err = _route->add_processor_by_index (processor, _placement, &err_streams, Config->get_new_plugins_active ());
+		}
+
+		if (err) {
 			weird_plugin_dialog (**p, err_streams);
 			return true;
 			// XXX SHAREDPTR delete plugin here .. do we even need to care?
@@ -3348,7 +3366,6 @@ ProcessorBox::paste_processor_state (const XMLNodeList& nlist, boost::shared_ptr
 	}
 
 	if (_route->add_processors (copies, p)) {
-
 		string msg = _(
 			"Copying the set of processors on the clipboard failed,\n\
 probably because the I/O configuration of the plugins\n\
