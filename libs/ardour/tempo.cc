@@ -1359,7 +1359,6 @@ TempoMap::recompute_meters (Metrics& metrics)
 				}
 				if (meter_locked_tempo) {
 					meter_locked_tempo->set_pulse (pulse);
-					recompute_tempos (metrics);
 				}
 				meter->set_beat (b_bbt);
 				meter->set_pulse (pulse);
