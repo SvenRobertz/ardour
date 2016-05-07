@@ -73,6 +73,7 @@ PluginInsert::PluginInsert (Session& s, boost::shared_ptr<Plugin> plug)
 	, _no_inplace (false)
 	, _strict_io (false)
 	, _custom_cfg (false)
+	, _enable_sum (false)
 	, _maps_from_state (false)
 {
 	/* the first is the master */
@@ -180,6 +181,17 @@ PluginInsert::set_preset_out (const ChanCount& c)
 	bool changed = _preset_out != c;
 	_preset_out = c;
 	if (changed && !_custom_cfg) {
+		PluginConfigChanged (); /* EMIT SIGNAL */
+	}
+	return changed;
+}
+
+bool
+PluginInsert::set_sum_out (const ChanCount& c)
+{
+	bool changed = _summed_out != c;
+	_summed_out = c;
+	if (changed && _enable_sum) {
 		PluginConfigChanged (); /* EMIT SIGNAL */
 	}
 	return changed;
@@ -504,6 +516,7 @@ PluginInsert::connect_and_run (BufferSet& bufs, pframes_t nframes, framecnt_t of
 	PinMappings in_map (_in_map);
 	PinMappings out_map (_out_map);
 	ChanMapping thru_map (_thru_map);
+	ChanMapping sum_map (_sum_map);
 	if (_mapping_changed) { // ToDo use a counters, increment until match.
 		_no_inplace = check_inplace ();
 		_mapping_changed = false;
@@ -701,18 +714,42 @@ PluginInsert::connect_and_run (BufferSet& bufs, pframes_t nframes, framecnt_t of
 		if (has_midi_bypass ()) {
 			nonzero_out.set (DataType::MIDI, 0, 1); // Midi bypass.
 		}
-		for (DataType::iterator t = DataType::begin(); t != DataType::end(); ++t) {
-			for (uint32_t out = 0; out < bufs.count().get (*t); ++out) {
+
+		if (!sum_map.is_identity () /* && port-count matches */) {
+			// TODO: optimize: fold sum_map into out map
+			// use read_from() for the first assignment.
+			for (DataType::iterator t = DataType::begin(); t != DataType::end(); ++t) {
 				bool valid;
-				used_outputs.get (*t, out, &valid);
-				if (!valid) {
-					nonzero_out.get (*t, out, &valid);
+				for (uint32_t out = 0; out < bufs.count().get (*t); ++out) {
+					valid = (out == 0) && (*t == DataType::MIDI); // inplace MIDI-bypass :(
 					if (!valid) {
 						bufs.get (*t, out).silence (nframes, offset);
 					}
-				} else {
+				}
+				for (uint32_t out = 0; out < bufs.count().get (*t); ++out) {
+					used_outputs.get (*t, out, &valid);
+					if (!valid) { continue; }
+					uint32_t o = sum_map.get (*t, out, &valid);
+					if (!valid) { continue; }
 					uint32_t m = out + natural_input_streams ().get (*t);
-					bufs.get (*t, out).read_from (inplace_bufs.get (*t, m), nframes, offset, offset);
+					bufs.get (*t, o).merge_from (inplace_bufs.get (*t, m), nframes, offset, offset);
+				}
+			}
+		} else {
+			// 1:1 output map
+			for (DataType::iterator t = DataType::begin(); t != DataType::end(); ++t) {
+				for (uint32_t out = 0; out < bufs.count().get (*t); ++out) {
+					bool valid;
+					used_outputs.get (*t, out, &valid);
+					if (!valid) {
+						nonzero_out.get (*t, out, &valid);
+						if (!valid) {
+							bufs.get (*t, out).silence (nframes, offset);
+						}
+					} else {
+						uint32_t m = out + natural_input_streams ().get (*t);
+						bufs.get (*t, out).read_from (inplace_bufs.get (*t, m), nframes, offset, offset);
+					}
 				}
 			}
 		}
@@ -820,15 +857,15 @@ PluginInsert::run (BufferSet& bufs, framepos_t start_frame, framepos_t end_frame
 		}
 
 	} else {
-		// TODO use mapping in bypassed mode ?!
-		// -> do we bypass the processor or the plugin
+		// TODO use mapping in bypassed mode!
+		// we bypass the plugin (not the processor)
 
-		// TODO include sidechain??
+		// TODO include sidechain if it feeds an output
 
 		uint32_t in = input_streams ().n_audio ();
 		uint32_t out = output_streams().n_audio ();
 
-		if (has_no_audio_inputs() || in == 0) {
+		if (has_no_audio_inputs() || in == 0) { // TODO check sidechain thru
 
 			/* silence all (audio) outputs. Should really declick
 			 * at the transitions of "active"
@@ -1068,6 +1105,32 @@ PluginInsert::set_thru_map (ChanMapping m) {
 	}
 }
 
+void
+PluginInsert::set_sum_map (ChanMapping m) {
+	bool changed = _sum_map != m;
+	_sum_map = m;
+	changed |= sanitize_maps ();
+	if (changed) {
+		PluginMapChanged (); /* EMIT SIGNAL */
+		_mapping_changed = true;
+		_session.set_dirty();
+	}
+}
+
+void
+PluginInsert::set_summing (bool en) {
+	if (_enable_sum == en) {
+		return;
+	}
+	_enable_sum = en;
+	if (_enable_sum) {
+		sanitize_maps ();
+	}
+	PluginMapChanged (); /* EMIT SIGNAL */
+	_mapping_changed = true;
+	_session.set_dirty();
+}
+
 ChanMapping
 PluginInsert::input_map () const
 {
@@ -1143,6 +1206,10 @@ PluginInsert::check_inplace ()
 		inplace_ok = false;
 	}
 
+	if (_enable_sum && !_sum_map.is_identity ()) {
+		inplace_ok = false;
+	}
+
 	if (_match.method == Split && inplace_ok) {
 		assert (get_count() == 1);
 		assert (_in_map.size () == 1);
@@ -1204,6 +1271,7 @@ PluginInsert::sanitize_maps ()
 	PinMappings new_ins;
 	PinMappings new_outs;
 	ChanMapping new_thru;
+	ChanMapping new_sum;
 
 	for (uint32_t pc = 0; pc < get_count(); ++pc) {
 		ChanMapping new_in;
@@ -1281,12 +1349,27 @@ PluginInsert::sanitize_maps ()
 		new_thru.unset (DataType::MIDI, 0);
 	}
 
+	if (!_enable_sum) {
+		new_sum = ChanMapping (_configured_out);
+	} else {
+		for (DataType::iterator t = DataType::begin(); t != DataType::end(); ++t) {
+			for (uint32_t o = 0; o < _configured_out.get (*t); ++o) {
+				bool valid;
+				uint32_t idx = _sum_map.get (*t, o, &valid);
+				if (valid /*&& idx < _configured_internal.get (*t)*/) {
+					new_sum.set (*t, o, idx);
+				}
+			}
+		}
+	}
+
 	if (_in_map != new_ins || _out_map != new_outs || _thru_map != new_thru) {
 		changed = true;
 	}
 	_in_map = new_ins;
 	_out_map = new_outs;
 	_thru_map = new_thru;
+	_sum_map = new_sum;
 
 	return changed;
 }
@@ -1437,7 +1520,7 @@ PluginInsert::configure_io (ChanCount in, ChanCount out)
 	case Delegate:
 		{
 			ChanCount din (_configured_internal);
-			ChanCount dout (din); // hint
+			ChanCount dout (din); // hint XXX _summed_out
 			if (_custom_cfg) {
 				if (_custom_sinks.n_total () > 0) {
 					din = _custom_sinks;
@@ -1634,7 +1717,7 @@ PluginInsert::Match
 PluginInsert::private_can_support_io_configuration (ChanCount const& in, ChanCount& out) const
 {
 	if (!_custom_cfg && _preset_out.n_audio () > 0) {
-		// preseed hint (for variable i/o)
+		// preseed hint (for variable i/o) XXX _summed_out
 		out.set (DataType::AUDIO, _preset_out.n_audio ());
 	}
 
@@ -1731,7 +1814,7 @@ PluginInsert::internal_can_support_io_configuration (ChanCount const & inx, Chan
 
 	if (info->reconfigurable_io()) {
 		ChanCount useins;
-		out = inx; // hint
+		out = inx; // hint XXX _summed_out
 		if (out.n_midi () > 0 && out.n_audio () == 0) { out.set (DataType::AUDIO, 2); }
 		if (out.n_audio () == 0) { out.set (DataType::AUDIO, 1); }
 		bool const r = _plugins.front()->can_support_io_configuration (inx + sidechain_input_pins (), out, &useins);
@@ -1800,7 +1883,7 @@ PluginInsert::automatic_can_support_io_configuration (ChanCount const & inx, Cha
 		/* Plugin has flexible I/O, so delegate to it
 		 * pre-seed outputs, plugin tries closest match
 		 */
-		out = in; // hint
+		out = in; // hint XXX _summed_out
 		if (out.n_midi () > 0 && out.n_audio () == 0) { out.set (DataType::AUDIO, 2); }
 		if (out.n_audio () == 0) { out.set (DataType::AUDIO, 1); }
 		bool const r = _plugins.front()->can_support_io_configuration (in + sidechain_input_pins (), out);
@@ -1979,6 +2062,10 @@ PluginInsert::state (bool full)
 		node.add_child_nocopy (* _out_map[pc].state (tmp));
 	}
 	node.add_child_nocopy (* _thru_map.state ("ThruMap"));
+
+	node.add_child_nocopy (* _summed_out.state (X_("SumOut")));
+	node.add_property("summing", _enable_sum ? "yes" : "no");
+	node.add_child_nocopy (* _sum_map.state ("SumMap"));
 
 	if (_sidechain) {
 		node.add_child_nocopy (_sidechain->state (full));
@@ -2271,6 +2358,17 @@ PluginInsert::set_state(const XMLNode& node, int version)
 		}
 		if ((*i)->name () ==  "ThruMap") {
 				_thru_map = ChanMapping (**i);
+		}
+
+		if ((*i)->name() == X_("SumOut")) {
+			_summed_out = ChanCount(**i);
+		}
+
+		if ((prop = node.property (X_("summing"))) != 0) {
+			_enable_sum = string_is_affirmative (prop->value());
+		}
+		if ((*i)->name () ==  "SumMap") {
+				_sum_map = ChanMapping (**i);
 		}
 
 		// sidechain is a Processor (IO)

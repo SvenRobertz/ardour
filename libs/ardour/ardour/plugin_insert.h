@@ -93,11 +93,16 @@ class LIBARDOUR_API PluginInsert : public Processor
 		return _thru_map;
 	}
 
+	ChanMapping sum_map () const {
+		return _sum_map;
+	}
+
 	ChanMapping input_map () const; ///< combined (all instances) input map
 	ChanMapping output_map () const; ///< combined (all instances) output map
 	bool has_midi_bypass () const;
 	bool has_midi_thru () const;
 	bool inplace () const { return ! _no_inplace; }
+	bool summing () const { return _enable_sum; }
 
 #ifdef MIXBUS
 	bool is_channelstrip () const;
@@ -106,9 +111,10 @@ class LIBARDOUR_API PluginInsert : public Processor
 	void set_input_map (uint32_t, ChanMapping);
 	void set_output_map (uint32_t, ChanMapping);
 	void set_thru_map (ChanMapping);
+	void set_sum_map (ChanMapping);
+
 	bool reset_map (bool emit = true);
-	bool sanitize_maps ();
-	bool check_inplace ();
+	void set_summing (bool);
 
 	// these are ports visible on the outside
 	ChanCount output_streams() const;
@@ -138,6 +144,7 @@ class LIBARDOUR_API PluginInsert : public Processor
 
 	const ChanCount& required_buffers () const { return _required_buffers; }
 	const ChanCount& preset_out () const { return _preset_out; }
+	const ChanCount& summed_out () const { return _summed_out; }
 
 	// allow to override output_streams(), implies "Custom Mode"
 
@@ -149,6 +156,7 @@ class LIBARDOUR_API PluginInsert : public Processor
 	void set_strict_io  (bool b);
 	void set_custom_cfg (bool b);
 	bool set_preset_out (const ChanCount&);
+	bool set_sum_out    (const ChanCount&);
 	bool add_sidechain  (uint32_t n_audio = 1);
 	bool del_sidechain ();
 	boost::shared_ptr<SideChain> sidechain () const { return _sidechain; }
@@ -312,6 +320,7 @@ class LIBARDOUR_API PluginInsert : public Processor
 	ChanCount _configured_in;
 	ChanCount _configured_internal; // with side-chain
 	ChanCount _configured_out;
+	ChanCount _summed_out;
 	ChanCount _custom_out;
 	ChanCount _custom_sinks;
 	ChanCount _preset_out;
@@ -322,6 +331,7 @@ class LIBARDOUR_API PluginInsert : public Processor
 	bool _no_inplace;
 	bool _strict_io;
 	bool _custom_cfg;
+	bool _enable_sum;
 	bool _maps_from_state;
 	bool _mapping_changed;
 
@@ -335,7 +345,11 @@ class LIBARDOUR_API PluginInsert : public Processor
 	typedef std::map <uint32_t, ARDOUR::ChanMapping> PinMappings;
 	PinMappings _in_map;
 	PinMappings _out_map;
-	ChanMapping _thru_map; // out-idx <=  in-idx
+	ChanMapping _thru_map; // out-idx <=  in-idx  (one input can go to mult. outputs, no mixing)
+	ChanMapping _sum_map; // in-idx <= out-idx (one output can have mult inputs
+
+	bool sanitize_maps ();
+	bool check_inplace ();
 
 	void automation_run (BufferSet& bufs, framepos_t start, pframes_t nframes);
 	void connect_and_run (BufferSet& bufs, pframes_t nframes, framecnt_t offset, bool with_auto, framepos_t now = 0);
