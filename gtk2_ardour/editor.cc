@@ -421,6 +421,7 @@ Editor::Editor ()
 	timebar_height = std::max(12., ceil (15. * UIConfiguration::instance().get_ui_scale()));
 	TimeAxisView::setup_sizes ();
 	ArdourMarker::setup_sizes (timebar_height);
+	TempoCurve::setup_sizes (timebar_height);
 
 	_scroll_callbacks = 0;
 
